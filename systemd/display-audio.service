@@ -1,0 +1,13 @@
+[Unit]
+Description=Display Audio Bridge
+Documentation=https://github.com/satorusaka/display-audio-bridge
+After=pipewire.service wireplumber.service
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env display-audio-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

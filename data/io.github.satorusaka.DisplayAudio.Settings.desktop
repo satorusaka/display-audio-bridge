@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Display Audio Bridge
+Comment=Configure DDC-backed display audio outputs
+Exec=display-audio-settings
+Icon=audio-card
+Terminal=false
+Type=Application
+Categories=Settings;AudioVideo;Audio;
+Keywords=PipeWire;DDC;Monitor;Volume;
+StartupNotify=true
