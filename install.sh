@@ -26,8 +26,14 @@ install -m644 "$repo_dir/systemd/display-audio.service" \
   "$unit_dir/display-audio.service"
 install -Dm644 "$repo_dir/data/io.github.satorusaka.DisplayAudio.Settings.desktop" \
   "$HOME/.local/share/applications/io.github.satorusaka.DisplayAudio.Settings.desktop"
+sed -i \
+  "s|^Exec=.*|Exec=$HOME/.local/bin/display-audio-settings|" \
+  "$HOME/.local/share/applications/io.github.satorusaka.DisplayAudio.Settings.desktop"
 install -Dm644 "$repo_dir/data/io.github.satorusaka.DisplayAudio.metainfo.xml" \
   "$HOME/.local/share/metainfo/io.github.satorusaka.DisplayAudio.metainfo.xml"
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$HOME/.local/share/applications"
+fi
 
 if [[ ! -f "$config_file" ]]; then
   display_serial="${DDC_DISPLAY_SERIAL:-}"
