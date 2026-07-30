@@ -192,6 +192,9 @@ class SettingsWindow(Adw.ApplicationWindow):
             dialog.present(self)
             return
         dialog = Adw.Dialog(title="Add display")
+        dialog.set_follows_content_size(False)
+        dialog.set_content_width(520)
+        dialog.set_content_height(360)
         page = Adw.PreferencesPage()
         group = Adw.PreferencesGroup()
         label = Adw.EntryRow(title="Output label")
