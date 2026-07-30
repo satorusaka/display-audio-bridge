@@ -1,0 +1,5 @@
+/ddc-volume-daemon
+/ddc-volume-control
+*.o
+core
+core.*

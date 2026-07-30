@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  arch-build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -Syu --noconfirm base-devel ddcutil libpulse shellcheck
+      - run: make clean all
+      - run: shellcheck install.sh uninstall.sh
+      - run: test ! -e ddc-volume-daemon -o -x ddc-volume-daemon

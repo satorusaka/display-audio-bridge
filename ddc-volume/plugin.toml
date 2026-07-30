@@ -1,0 +1,30 @@
+id = "satorusaka/ddc-volume"
+name = "DDC Volume"
+version = "1.0.0"
+plugin_api = 14
+author = "satorusaka"
+license = "MIT"
+dependencies = ["ddcutil"]
+icon = "volume"
+description = "Adaptive DDC/CI monitor and PipeWire output volume control."
+tags = ["audio", "ddc", "pipewire", "volume"]
+
+[[service]]
+id = "service"
+entry = "service.luau"
+
+[[widget]]
+id = "volume"
+entry = "widget.luau"
+
+  [widget.actions]
+  middle = "none"
+
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 390
+height = 160
+placement = "attached"
+position = "auto"
+open_near_click = true
