@@ -1,115 +1,142 @@
-# Display Audio
+# Display Audio Bridge
 
-One normal PipeWire volume control backed by a monitor's DDC/CI hardware
-volume. The service creates a standard output named **Display Audio**, so
-Noctalia, `wpctl`, pavucontrol, media keys, and third-party plugins all control
-the same value.
-
-## How it works
+Display Audio Bridge exposes every enrolled DDC/CI monitor as an independent
+standard PipeWire output. Desktop volume controls, media keys, Noctalia,
+pavucontrol, and third-party PipeWire tools can therefore control monitor
+hardware without a custom widget or API.
 
 ```text
-applications → Display Audio → unity-gain HDMI/DP transport → monitor speakers
-                       └──── standard PipeWire volume → DDC/CI
+applications → Display Audio — LG   → HDMI transport → LG speakers
+             → Display Audio — Dell → DP transport   → Dell speakers
 ```
 
-In hardware mode, Display Audio's private loopback applies reciprocal gain to
-cancel PipeWire's sink attenuation. The digital path therefore remains at
-unity while DDC VCP `0x62` controls the monitor. The raw HDMI/DisplayPort sink
-stays visible for diagnostics but is pinned at 100%.
+## Behavior
 
-If DDC is temporarily unavailable, reciprocal compensation is removed and
-Display Audio becomes an ordinary software-volume sink. The requested value is
-retained and written to hardware when DDC recovers.
+Each profile creates `input.display_audio.<profile-id>`. Its raw HDMI or
+DisplayPort transport remains visible for diagnostics and is held at unity
+gain. In hardware mode the bridge applies reciprocal gain to its private
+loopback, so the digital path remains at unity while DDC VCP `0x62` controls
+the monitor.
 
-## Features
+Each output has independent volume, mute, recovery, range, and curve state.
+Changing one output never changes another. There is no configured display
+limit.
 
-- Standard PipeWire sink named `input.display_audio`
-- Hardware volume controlled through DDC/CI
-- Automatic software-volume fallback during DPMS, sleep, and hotplug
-- Recovery after I2C re-enumeration without restarting the service
-- Stable display selection by EDID serial
-- Other outputs retain independent native PipeWire volume
-- No custom Noctalia widget or plugin API required
+When DDC becomes unavailable but the audio transport remains present, the
+output changes to ordinary PipeWire software volume. The requested value is
+written to the monitor when DDC recovers. Monitors without working VCP `0x8d`
+use PipeWire mute automatically.
 
 ## Requirements
 
 - Arch Linux
 - PipeWire with `pipewire-pulse`
-- `ddcutil`, `libpulse`, and `base-devel`
-- A monitor exposing MCCS audio volume VCP `0x62`
-- User read/write access to the monitor's `/dev/i2c-*` device
+- `ddcutil`, `libpulse`, and user access to `/dev/i2c-*`
+- Python, PyGObject, GTK4, and Libadwaita for the settings application
 
 ```sh
-sudo pacman -S --needed base-devel ddcutil libpulse pipewire-pulse
+sudo pacman -S --needed base-devel ddcutil libpulse pipewire-pulse \
+  python python-gobject gtk4 libadwaita libnotify
 ```
 
-Arch normally grants the active desktop session access through `uaccess`. If
-`ddcutil detect` reports a permission failure, add your user to the `i2c`
-group, then log out and back in:
-
-```sh
-sudo usermod -aG i2c "$USER"
-```
-
-No polkit helper or root daemon is required.
+The service is unprivileged. Normal `uaccess` or `i2c` group permissions are
+preferred over a root or polkit helper.
 
 ## Install
 
 ```sh
-git clone https://github.com/satorusaka/noctalia-ddc-volume
-cd noctalia-ddc-volume
+git clone https://github.com/satorusaka/display-audio-bridge
+cd display-audio-bridge
 ./install.sh
 ```
 
-The installer asks which detected display and PipeWire sink belong together,
-installs the user service, creates Display Audio, and selects it as the
-default. For unattended installation:
+The installer migrates an existing v2 single-display configuration or asks
+for the first display/transport pair. It starts the new service before removing
+the old service and commands.
+
+Open `display-audio-settings` to add displays, enable or remove profiles,
+select the default output, and tune hardware ranges or curves. A unique
+unassigned display and transport pair can be enrolled automatically; ambiguous
+hardware always requires confirmation.
+
+## CLI
 
 ```sh
-./install.sh \
-  --display-serial SERIAL_FROM_DDCUTIL \
-  --monitor-sink PIPEWIRE_SINK_NAME
+display-audio list
+display-audio scan
+display-audio add --label Dell --serial SERIAL --sink PIPEWIRE_SINK
+display-audio set-default dell
+display-audio enable dell
+display-audio disable dell
+display-audio remove dell
+display-audio status --json
+display-audio watch
+display-audio doctor
 ```
 
-Use your desktop's normal volume controls. Example Hyprland commands:
+Normal volume commands target whichever output the desktop selected:
 
-```text
-wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+
-wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%-
-wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+```sh
+display-audio up
+display-audio down
+display-audio mute
+display-audio set 35
 ```
 
-Noctalia users should use its built-in `volume` widget and the standard
-`volume-up`, `volume-down`, and `volume-mute` IPC commands.
+Equivalent `wpctl`, desktop-shell, and Noctalia volume commands work without
+special integration.
+
+## Configuration
+
+Profiles are stored in `~/.config/display-audio/config.ini`:
+
+```ini
+[general]
+poll_ms = 2000
+notifications = true
+auto_enroll = true
+
+[display:lg]
+label = LG
+serial = 123456
+sink = alsa_output.pci-0000_03_00.1.hdmi-stereo
+bus = 4
+enabled = true
+minimum = 5
+maximum = 80
+curve = 1.3
+mute = auto
+```
+
+Profile IDs are stable and form part of the PipeWire node name. Labels may be
+changed freely. Configuration writes are atomic and reject duplicate serial or
+transport assignments.
 
 ## Diagnostics
 
-```text
-ddc-volume-control get
-ddc-volume-control watch
-```
-
-State lines end with one of:
-
-- `ddc hardware` — DDC owns volume and the digital path is unity.
-- `ddc software-fallback` — DDC is unavailable and PipeWire gain is active.
-- `pipewire native` — another output is selected.
-
-Runtime configuration is stored at
-`~/.config/ddc-volume-control/environment`. Rerun the installer to select a
-different display or transport sink.
-
 ```sh
-systemctl --user status ddc-volume-sync.service
-journalctl --user -u ddc-volume-sync.service -n 100
+systemctl --user status display-audio.service
+journalctl --user -u display-audio.service -n 100
+display-audio doctor
+display-audio status
 ddcutil detect
 ```
 
-## Upgrade from v1
+Worker state ends in `ddc hardware` or `ddc software-fallback`. Every profile
+has a private control socket at
+`$XDG_RUNTIME_DIR/display-audio.<profile-id>.sock`.
 
-Rerun `./install.sh`, replace `satorusaka/ddc-volume:volume` with Noctalia's
-built-in `volume` widget, and change media-key bindings to standard `wpctl` or
-Noctalia volume commands. The old local plugin directory can then be removed.
+Desktop integrations can use session bus name
+`io.github.satorusaka.DisplayAudio`, object
+`/io/github/satorusaka/DisplayAudio`, and interface
+`io.github.satorusaka.DisplayAudio.Manager`. It exposes listing, rescanning,
+validated profile updates/removal, default selection, and `ProfilesChanged`.
+
+## Packaging and release
+
+`PKGBUILD` and `.SRCINFO` build the `display-audio-bridge` Arch package.
+Version tags create a draft GitHub release containing an Arch package, source
+archive, and SHA-256 checksums.
 
 ## Uninstall
 
@@ -118,8 +145,9 @@ Noctalia volume commands. The old local plugin directory can then be removed.
 ./uninstall.sh --purge
 ```
 
-## Authorship and license
+The first form preserves profiles. `--purge` removes them.
 
-The codebase was generated by OpenAI Codex under satorusaka's direction and
-tested on real LG hardware. See [CODE_GENERATION.md](CODE_GENERATION.md).
-Licensed under the MIT License.
+## License
+
+MIT. The codebase was generated by OpenAI Codex under satorusaka's direction;
+see [CODE_GENERATION.md](CODE_GENERATION.md).

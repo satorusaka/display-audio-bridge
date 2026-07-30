@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  arch-package:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: >-
+          pacman -Syu --noconfirm base-devel ddcutil libpulse pipewire-pulse
+          python python-gobject gtk4 libadwaita libnotify git github-cli
+      - run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c 'makepkg --noconfirm --syncdeps'
+      - run: |
+          git archive --format=tar.gz --prefix="display-audio-bridge-${GITHUB_REF_NAME#v}/" \
+            -o "display-audio-bridge-${GITHUB_REF_NAME#v}.tar.gz" "$GITHUB_REF_NAME"
+          sha256sum ./*.pkg.tar.zst ./*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            *.pkg.tar.zst
+            display-audio-bridge-*.tar.gz
+            SHA256SUMS

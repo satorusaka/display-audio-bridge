@@ -10,7 +10,12 @@ jobs:
     container: archlinux:latest
     steps:
       - uses: actions/checkout@v5
-      - run: pacman -Syu --noconfirm base-devel ddcutil libpulse shellcheck
+      - run: >-
+          pacman -Syu --noconfirm base-devel ddcutil libpulse shellcheck
+          python python-gobject gtk4 libadwaita desktop-file-utils appstream
       - run: make check
+      - run: python -m py_compile display_audio_*.py
       - run: shellcheck install.sh uninstall.sh
-      - run: test ! -e ddc-volume-daemon -o -x ddc-volume-daemon
+      - run: desktop-file-validate data/*.desktop
+      - run: appstreamcli validate --no-net data/*.metainfo.xml
+      - run: test -x display-audio-worker

@@ -1,0 +1,20 @@
+pkgbase = display-audio-bridge
+	pkgdesc = PipeWire volume controls backed by DDC/CI display hardware
+	pkgver = 3.0.0
+	pkgrel = 1
+	url = https://github.com/satorusaka/display-audio-bridge
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	depends = ddcutil
+	depends = libpulse
+	depends = pipewire-pulse
+	depends = python
+	depends = python-gobject
+	depends = gtk4
+	depends = libadwaita
+	depends = libnotify
+	source = display-audio-bridge-3.0.0.tar.gz::https://github.com/satorusaka/display-audio-bridge/archive/refs/tags/v3.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = display-audio-bridge

@@ -2,31 +2,34 @@ CC ?= cc
 CFLAGS ?= -O2 -pipe
 CFLAGS += -std=c11 -Wall -Wextra -Wpedantic
 DAEMON_CFLAGS = $(shell pkg-config --cflags ddcutil libpulse)
-DAEMON_LDLIBS = $(shell pkg-config --libs ddcutil libpulse)
+DAEMON_LDLIBS = $(shell pkg-config --libs ddcutil libpulse) -lm
 
 PREFIX ?= $(HOME)/.local
 
 .PHONY: all install check clean
 
-all: ddc-volume-daemon ddc-volume-control
+all: display-audio-worker
 
-ddc-volume-daemon: ddc-volume-control.c
+display-audio-worker: display-audio-daemon.c
 	$(CC) $(CFLAGS) $(DAEMON_CFLAGS) -o $@ $< $(DAEMON_LDLIBS)
 
-ddc-volume-control: ddc-volume-client.c
-	$(CC) $(CFLAGS) -o $@ $<
-
-install: ddc-volume-daemon ddc-volume-control
-	install -Dm755 ddc-volume-daemon "$(DESTDIR)$(PREFIX)/bin/ddc-volume-daemon"
-	install -Dm755 ddc-volume-control "$(DESTDIR)$(PREFIX)/bin/ddc-volume-control"
+install: display-audio-worker
+	install -Dm755 display-audio-worker "$(DESTDIR)$(PREFIX)/bin/display-audio-worker"
+	install -Dm755 display_audio_manager.py "$(DESTDIR)$(PREFIX)/bin/display-audio-daemon"
+	install -Dm755 display_audio_cli.py "$(DESTDIR)$(PREFIX)/bin/display-audio"
+	install -Dm755 display_audio_settings.py "$(DESTDIR)$(PREFIX)/bin/display-audio-settings"
+	install -Dm644 display_audio_common.py \
+		"$(DESTDIR)$(PREFIX)/lib/display-audio/display_audio_common.py"
+	install -Dm644 display_audio_common.py \
+		"$(DESTDIR)$(PREFIX)/bin/display_audio_common.py"
 
 check: clean all
-	@test -x ddc-volume-daemon
-	@test -x ddc-volume-control
+	@test -x display-audio-worker
 	$(CC) $(CFLAGS) $(shell pkg-config --cflags libpulse) \
 		-o tests/volume-math tests/volume-math.c \
-		$(shell pkg-config --libs libpulse)
+		$(shell pkg-config --libs libpulse) -lm
+	python -m unittest discover -s tests -p 'test_*.py'
 	./tests/volume-math
 
 clean:
-	rm -f ddc-volume-daemon ddc-volume-control tests/volume-math
+	rm -f display-audio-worker tests/volume-math

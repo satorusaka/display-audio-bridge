@@ -1,6 +1,7 @@
-/ddc-volume-daemon
-/ddc-volume-control
+/display-audio-worker
 /tests/volume-math
+__pycache__/
+tests/__pycache__/
 *.o
 core
 core.*

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0.0
+
+- Rename the project and commands to Display Audio Bridge.
+- Support any number of independent DDC-backed PipeWire outputs.
+- Add stable profiles, conservative discovery, and automatic known-device
+  recovery.
+- Add per-display volume ranges, curves, and software mute fallback.
+- Add a GTK4/Libadwaita settings application and expanded management CLI.
+- Add v2 migration, Arch packaging, AppStream metadata, and tagged releases.
+
 ## 2.0.0
 
 - Replace the custom Noctalia volume widget with the standard PipeWire
