@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: pacman -Syu --noconfirm base-devel ddcutil libpulse shellcheck
       - run: make clean all
       - run: shellcheck install.sh uninstall.sh
