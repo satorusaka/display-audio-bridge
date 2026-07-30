@@ -1,37 +1,51 @@
-# Noctalia DDC Volume
+# Display Audio
 
-Adaptive volume control for Noctalia v5 on Arch Linux. When the configured
-monitor sink is selected, volume keys control the monitor's speakers directly
-through DDC/CI and keep the PipeWire sink at 100%. When another output is
-selected, the same controls operate on that PipeWire sink normally.
+One normal PipeWire volume control backed by a monitor's DDC/CI hardware
+volume. The service creates a standard output named **Display Audio**, so
+Noctalia, `wpctl`, pavucontrol, media keys, and third-party plugins all control
+the same value.
+
+## How it works
+
+```text
+applications → Display Audio → unity-gain HDMI/DP transport → monitor speakers
+                       └──── standard PipeWire volume → DDC/CI
+```
+
+In hardware mode, Display Audio's private loopback applies reciprocal gain to
+cancel PipeWire's sink attenuation. The digital path therefore remains at
+unity while DDC VCP `0x62` controls the monitor. The raw HDMI/DisplayPort sink
+stays visible for diagnostics but is pinned at 100%.
+
+If DDC is temporarily unavailable, reciprocal compensation is removed and
+Display Audio becomes an ordinary software-volume sink. The requested value is
+retained and written to hardware when DDC recovers.
 
 ## Features
 
-- Low-latency DDC writes from a persistent native daemon
-- Automatic PipeWire/DDC routing based on the selected output
-- Noctalia bar widget, panel, scrolling, mute, and OSD integration
-- Recovery after monitor sleep, DPMS, hotplug, and I2C re-enumeration
-- Stable monitor selection by EDID serial instead of a fixed I2C bus
-- Per-output PipeWire volumes are not pinned when the monitor is not selected
+- Standard PipeWire sink named `input.display_audio`
+- Hardware volume controlled through DDC/CI
+- Automatic software-volume fallback during DPMS, sleep, and hotplug
+- Recovery after I2C re-enumeration without restarting the service
+- Stable display selection by EDID serial
+- Other outputs retain independent native PipeWire volume
+- No custom Noctalia widget or plugin API required
 
 ## Requirements
 
 - Arch Linux
-- Noctalia v5
 - PipeWire with `pipewire-pulse`
-- `ddcutil`, `libpulse`, `base-devel`
-- A monitor that exposes MCCS audio volume VCP `0x62`
+- `ddcutil`, `libpulse`, and `base-devel`
+- A monitor exposing MCCS audio volume VCP `0x62`
 - User read/write access to the monitor's `/dev/i2c-*` device
-
-Install dependencies:
 
 ```sh
 sudo pacman -S --needed base-devel ddcutil libpulse pipewire-pulse
 ```
 
-Arch's ddcutil udev rules normally grant an active desktop user access through
-`uaccess`. If `ddcutil detect` reports a permission failure, add your user to
-the `i2c` group and log out and back in:
+Arch normally grants the active desktop session access through `uaccess`. If
+`ddcutil detect` reports a permission failure, add your user to the `i2c`
+group, then log out and back in:
 
 ```sh
 sudo usermod -aG i2c "$USER"
@@ -47,9 +61,9 @@ cd noctalia-ddc-volume
 ./install.sh
 ```
 
-The installer detects DDC displays and PipeWire sinks, asks which pair belongs
-together, builds the backend, installs a systemd user service, and installs the
-Noctalia plugin. For unattended installation:
+The installer asks which detected display and PipeWire sink belong together,
+installs the user service, creates Display Audio, and selects it as the
+default. For unattended installation:
 
 ```sh
 ./install.sh \
@@ -57,62 +71,55 @@ Noctalia plugin. For unattended installation:
   --monitor-sink PIPEWIRE_SINK_NAME
 ```
 
-Add `satorusaka/ddc-volume:volume` to a Noctalia bar. Example Hyprland media
-key commands:
+Use your desktop's normal volume controls. Example Hyprland commands:
 
 ```text
-~/.local/bin/ddc-volume-control up --osd
-~/.local/bin/ddc-volume-control down --osd
-~/.local/bin/ddc-volume-control mute --osd
+wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+
+wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%-
+wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 ```
 
-## Commands
+Noctalia users should use its built-in `volume` widget and the standard
+`volume-up`, `volume-down`, and `volume-mute` IPC commands.
+
+## Diagnostics
 
 ```text
 ddc-volume-control get
 ddc-volume-control watch
-ddc-volume-control up|down|mute [--osd]
-ddc-volume-control set PERCENT [--osd]
 ```
 
-Runtime configuration is stored in
+State lines end with one of:
+
+- `ddc hardware` — DDC owns volume and the digital path is unity.
+- `ddc software-fallback` — DDC is unavailable and PipeWire gain is active.
+- `pipewire native` — another output is selected.
+
+Runtime configuration is stored at
 `~/.config/ddc-volume-control/environment`. Rerun the installer to select a
-different display or monitor sink.
-
-## Troubleshooting
-
-Inspect the current routing state and service:
+different display or transport sink.
 
 ```sh
-ddc-volume-control get
 systemctl --user status ddc-volume-sync.service
 journalctl --user -u ddc-volume-sync.service -n 100
 ddcutil detect
 ```
 
-`STATE ... ddc` means the configured monitor output is selected.
-`STATE ... pipewire` means another output is selected. An unavailable DDC state
-usually means the monitor is asleep or its DDC controller is still waking; the
-daemon rescans automatically with bounded exponential backoff.
+## Upgrade from v1
 
-Some displays do not implement DDC mute VCP `0x8d` even when volume works.
-Those displays may support volume changes without hardware mute.
+Rerun `./install.sh`, replace `satorusaka/ddc-volume:volume` with Noctalia's
+built-in `volume` widget, and change media-key bindings to standard `wpctl` or
+Noctalia volume commands. The old local plugin directory can then be removed.
 
 ## Uninstall
 
 ```sh
 ./uninstall.sh
-./uninstall.sh --purge  # also remove saved hardware selection
+./uninstall.sh --purge
 ```
-
-## Support policy
-
-The initial release supports Arch Linux, systemd user sessions, PipeWire, and
-Noctalia v5. The Noctalia v5 plugin API is currently beta and may require
-updates as the shell evolves.
 
 ## Authorship and license
 
-The initial v1.0.0 codebase was entirely generated by OpenAI Codex under
-satorusaka's direction and tested on real LG hardware. See
-[CODE_GENERATION.md](CODE_GENERATION.md). Licensed under the MIT License.
+The codebase was generated by OpenAI Codex under satorusaka's direction and
+tested on real LG hardware. See [CODE_GENERATION.md](CODE_GENERATION.md).
+Licensed under the MIT License.

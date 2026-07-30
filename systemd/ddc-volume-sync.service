@@ -1,5 +1,5 @@
 [Unit]
-Description=Adaptive DDC/CI and PipeWire volume control
+Description=Display Audio hardware volume bridge
 Documentation=https://github.com/satorusaka/noctalia-ddc-volume
 After=pipewire.service wireplumber.service
 ConditionFileIsExecutable=%h/.local/bin/ddc-volume-daemon

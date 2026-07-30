@@ -11,6 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: pacman -Syu --noconfirm base-devel ddcutil libpulse shellcheck
-      - run: make clean all
+      - run: make check
       - run: shellcheck install.sh uninstall.sh
       - run: test ! -e ddc-volume-daemon -o -x ddc-volume-daemon

@@ -23,6 +23,10 @@ install: ddc-volume-daemon ddc-volume-control
 check: clean all
 	@test -x ddc-volume-daemon
 	@test -x ddc-volume-control
+	$(CC) $(CFLAGS) $(shell pkg-config --cflags libpulse) \
+		-o tests/volume-math tests/volume-math.c \
+		$(shell pkg-config --libs libpulse)
+	./tests/volume-math
 
 clean:
-	rm -f ddc-volume-daemon ddc-volume-control
+	rm -f ddc-volume-daemon ddc-volume-control tests/volume-math

@@ -1,5 +1,6 @@
 /ddc-volume-daemon
 /ddc-volume-control
+/tests/volume-math
 *.o
 core
 core.*

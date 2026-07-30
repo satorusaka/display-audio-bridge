@@ -161,11 +161,11 @@ int main(int argc, char **argv) {
 	if (strcmp(argv[1], "watch") == 0)
 		return run_client("WATCH", true, false);
 	if (strcmp(argv[1], "up") == 0)
-		return run_client("UP", false, osd);
+		return run_pipewire_command("UP", osd);
 	if (strcmp(argv[1], "down") == 0)
-		return run_client("DOWN", false, osd);
+		return run_pipewire_command("DOWN", osd);
 	if (strcmp(argv[1], "mute") == 0)
-		return run_client("MUTE", false, osd);
+		return run_pipewire_command("MUTE", osd);
 	if (strcmp(argv[1], "set") == 0 && argc >= 3) {
 		char command[64];
 		char *end = NULL;
@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
 			return 2;
 		}
 		snprintf(command, sizeof(command), "SET %ld", requested);
-		return run_client(command, false, osd);
+		return run_pipewire_command(command, osd);
 	}
 
 	usage(stderr);

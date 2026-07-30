@@ -70,15 +70,9 @@ make -C "$repo_dir" install
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ddc-volume-control"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-plugin_dir="${XDG_DATA_HOME:-$HOME/.local/share}/noctalia/plugins/ddc-volume"
-mkdir -p "$config_dir" "$unit_dir" "$plugin_dir"
+mkdir -p "$config_dir" "$unit_dir"
 install -m644 "$repo_dir/systemd/ddc-volume-sync.service" \
   "$unit_dir/ddc-volume-sync.service"
-install -m644 "$repo_dir/ddc-volume/plugin.toml" "$plugin_dir/plugin.toml"
-install -m644 "$repo_dir/ddc-volume/"*.luau "$plugin_dir/"
-mkdir -p "$plugin_dir/translations"
-install -m644 "$repo_dir/ddc-volume/translations/en.json" \
-  "$plugin_dir/translations/en.json"
 
 umask 077
 {
@@ -91,5 +85,15 @@ umask 077
 systemctl --user daemon-reload
 systemctl --user enable ddc-volume-sync.service
 systemctl --user restart ddc-volume-sync.service
-noctalia msg plugins enable satorusaka/ddc-volume || true
-printf 'Installed for display %s and sink %s.\n' "$display_serial" "$monitor_sink"
+
+for _ in {1..50}; do
+  if pactl list short sinks | awk '$2 == "input.display_audio" { found=1 } END { exit !found }'; then
+    pactl set-default-sink input.display_audio
+    printf 'Installed Display Audio for display %s and transport %s.\n' \
+      "$display_serial" "$monitor_sink"
+    exit 0
+  fi
+  sleep 0.1
+done
+printf '%s\n' "Service started, but Display Audio did not appear." >&2
+exit 1

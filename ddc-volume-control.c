@@ -24,6 +24,8 @@
 #define MAX_WATCHERS 32
 #define DDC_RECOVERY_MIN_MS 2000
 #define DDC_RECOVERY_MAX_MS 30000
+#define DISPLAY_AUDIO_SINK "input.display_audio"
+#define DISPLAY_AUDIO_MODULE_SINK "display_audio"
 
 struct shared_state {
 	pthread_mutex_t mutex;
@@ -34,6 +36,7 @@ struct shared_state {
 	bool available;
 	bool monitor_active;
 	bool ddc_refresh;
+	bool ddc_initializing;
 	bool stopping;
 	unsigned long generation;
 	unsigned long confirmed_generation;
@@ -264,12 +267,11 @@ static void *ddc_worker(void *opaque) {
 		display_failed(&display);
 	}
 
-	int confirmed_volume = 0;
 	int confirmed_maximum = 100;
-	bool confirmed_muted = false;
 	unsigned long handled_generation = 0;
 	int written_volume = 0;
 	bool written_muted = false;
+	bool retry_pending = false;
 
 	for (;;) {
 		pthread_mutex_lock(&state->mutex);
@@ -300,10 +302,8 @@ static void *ddc_worker(void *opaque) {
 			pthread_mutex_lock(&state->mutex);
 			if (state->monitor_active) {
 				if (result == 0) {
-					confirmed_volume = initial_volume;
 					confirmed_maximum =
 					    initial_maximum > 0 ? initial_maximum : 100;
-					confirmed_muted = initial_muted;
 					written_volume = initial_volume;
 					written_muted = initial_muted;
 					handled_generation = state->generation;
@@ -312,9 +312,13 @@ static void *ddc_worker(void *opaque) {
 					state->muted = initial_muted;
 					state->available = true;
 					state->confirmed_generation = state->generation;
+					retry_pending = false;
 				} else {
 					state->available = false;
+					handled_generation = state->generation;
+					retry_pending = true;
 				}
+				state->ddc_initializing = false;
 			}
 			pthread_mutex_unlock(&state->mutex);
 			notify_main(state);
@@ -324,6 +328,7 @@ static void *ddc_worker(void *opaque) {
 		struct timespec deadline = deadline_after_ms(state->poll_ms);
 		while (!state->stopping && state->monitor_active &&
 		       state->generation == handled_generation &&
+		       !retry_pending &&
 		       !state->ddc_refresh) {
 			int wait_result =
 			    pthread_cond_timedwait(&state->changed, &state->mutex, &deadline);
@@ -339,14 +344,29 @@ static void *ddc_worker(void *opaque) {
 			continue;
 		}
 
-		if (state->generation != handled_generation) {
+		if (retry_pending && state->generation == handled_generation) {
+			int64_t remaining = display.retry_after_ms - monotonic_ms();
+			if (remaining > 0) {
+				struct timespec retry_deadline =
+				    deadline_after_ms((int)remaining);
+				pthread_cond_timedwait(&state->changed, &state->mutex,
+				                       &retry_deadline);
+				pthread_mutex_unlock(&state->mutex);
+				continue;
+			}
+		}
+
+		if (state->generation != handled_generation || retry_pending) {
 			unsigned long target_generation = state->generation;
 			int target_volume = state->volume;
 			bool target_muted = state->muted;
+			bool recovery_write = retry_pending;
 			pthread_mutex_unlock(&state->mutex);
 
-			bool change_volume = target_volume != written_volume;
-			bool change_mute = target_muted != written_muted;
+			bool change_volume =
+			    recovery_write || target_volume != written_volume;
+			bool change_mute =
+			    recovery_write || target_muted != written_muted;
 			int result = -1;
 			if (prepare_display(&display, state->bus,
 			                    state->display_serial))
@@ -363,16 +383,12 @@ static void *ddc_worker(void *opaque) {
 			if (result == 0 && state->monitor_active) {
 				written_volume = target_volume;
 				written_muted = target_muted;
-				confirmed_volume = target_volume;
-				confirmed_muted = target_muted;
 				state->available = true;
 				state->confirmed_generation = target_generation;
+				retry_pending = false;
 			} else if (state->monitor_active) {
 				state->available = false;
-				if (state->generation == target_generation) {
-					state->volume = confirmed_volume;
-					state->muted = confirmed_muted;
-				}
+				retry_pending = true;
 			}
 			pthread_mutex_unlock(&state->mutex);
 			notify_main(state);
@@ -396,8 +412,6 @@ static void *ddc_worker(void *opaque) {
 			pthread_mutex_lock(&state->mutex);
 			if (state->monitor_active &&
 			    state->generation == handled_generation) {
-				confirmed_volume = polled_volume;
-				confirmed_muted = polled_muted;
 				written_volume = polled_volume;
 				written_muted = polled_muted;
 				state->volume = polled_volume;
@@ -410,8 +424,10 @@ static void *ddc_worker(void *opaque) {
 			notify_main(state);
 		} else {
 			pthread_mutex_lock(&state->mutex);
-			if (state->monitor_active)
+			if (state->monitor_active) {
 				state->available = false;
+				retry_pending = true;
+			}
 			pthread_mutex_unlock(&state->mutex);
 			notify_main(state);
 		}
@@ -423,12 +439,83 @@ struct pulse_control {
 	pa_threaded_mainloop *mainloop;
 	pa_context *context;
 	struct shared_state *state;
+	uint32_t module_index;
+	uint32_t loopback_input_index;
+	uint32_t loopback_sink_index;
+	bool module_loaded;
+	bool setting_virtual;
+	bool seeding_virtual;
+	pa_volume_t requested_pa_volume;
+	bool requested_muted;
 };
 
 static bool pulse_sink_is_monitor(const struct pulse_control *pulse,
                                   const pa_sink_info *info) {
-	return pulse->state->monitor_sink[0] && info->name &&
-	       strcmp(info->name, pulse->state->monitor_sink) == 0;
+	(void)pulse;
+	return info->name && strcmp(info->name, DISPLAY_AUDIO_SINK) == 0;
+}
+
+static void set_sink_unity(pa_context *context, const pa_sink_info *info) {
+	bool unity = true;
+	for (uint8_t channel = 0; channel < info->volume.channels; channel++)
+		if (info->volume.values[channel] != PA_VOLUME_NORM)
+			unity = false;
+	if (!unity) {
+		pa_cvolume volume;
+		pa_cvolume_set(&volume, info->channel_map.channels, PA_VOLUME_NORM);
+		pa_operation *operation = pa_context_set_sink_volume_by_index(
+		    context, info->index, &volume, NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+	}
+	if (info->mute) {
+		pa_operation *operation =
+		    pa_context_set_sink_mute_by_index(context, info->index, 0, NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+	}
+}
+
+static void update_loopback_compensation(struct pulse_control *pulse) {
+	if (pulse->loopback_input_index == PA_INVALID_INDEX)
+		return;
+	pthread_mutex_lock(&pulse->state->mutex);
+	bool hardware = pulse->state->monitor_active && pulse->state->available;
+	pthread_mutex_unlock(&pulse->state->mutex);
+
+	pa_volume_t compensation = PA_VOLUME_NORM;
+	if (hardware && pulse->requested_pa_volume > PA_VOLUME_MUTED)
+		compensation = pa_sw_volume_divide(
+		    PA_VOLUME_NORM, pulse->requested_pa_volume);
+	pa_cvolume volume;
+	pa_cvolume_set(&volume, 2, compensation);
+	pa_operation *operation = pa_context_set_sink_input_volume(
+	    pulse->context, pulse->loopback_input_index, &volume, NULL, NULL);
+	if (operation)
+		pa_operation_unref(operation);
+}
+
+static void sink_input_info(pa_context *context,
+                            const pa_sink_input_info *info, int eol,
+                            void *userdata) {
+	(void)context;
+	struct pulse_control *pulse = userdata;
+	if (eol || !info || !pulse->module_loaded)
+		return;
+	const char *module_id =
+	    pa_proplist_gets(info->proplist, "pulse.module.id");
+	if (!module_id || strtoul(module_id, NULL, 10) != pulse->module_index)
+		return;
+	pulse->loopback_input_index = info->index;
+	pulse->loopback_sink_index = info->sink;
+	update_loopback_compensation(pulse);
+}
+
+static void request_loopback_input(struct pulse_control *pulse) {
+	pa_operation *operation = pa_context_get_sink_input_info_list(
+	    pulse->context, sink_input_info, pulse);
+	if (operation)
+		pa_operation_unref(operation);
 }
 
 static void default_sink_info(pa_context *context, const pa_sink_info *info,
@@ -439,19 +526,56 @@ static void default_sink_info(pa_context *context, const pa_sink_info *info,
 
 	bool monitor = pulse_sink_is_monitor(pulse, info);
 	bool became_monitor = false;
+	pa_volume_t requested = pa_cvolume_avg(&info->volume);
+	if (monitor) {
+		pulse->requested_pa_volume = requested;
+		pulse->requested_muted = info->mute != 0;
+	}
 
 	pthread_mutex_lock(&pulse->state->mutex);
 	if (monitor) {
 		if (!pulse->state->monitor_active) {
 			pulse->state->monitor_active = true;
 			pulse->state->ddc_refresh = true;
+			pulse->state->ddc_initializing = true;
 			pulse->state->available = false;
+			pulse->state->volume = clamp_int(
+			    (int)(((uint64_t)requested * 100 +
+			           PA_VOLUME_NORM / 2) /
+			          PA_VOLUME_NORM),
+			    0, 100);
+			pulse->state->maximum = 100;
+			pulse->state->muted = info->mute != 0;
+			pulse->seeding_virtual = true;
 			became_monitor = true;
 			pthread_cond_signal(&pulse->state->changed);
+		} else if (pulse->seeding_virtual) {
+			/* Wait for the first hardware read before accepting restored
+			 * PipeWire volume as a new DDC request. */
+		} else if (pulse->setting_virtual &&
+		           pulse->requested_pa_volume == requested &&
+		           pulse->requested_muted == (info->mute != 0)) {
+			pulse->setting_virtual = false;
+		} else {
+			int volume = clamp_int(
+			    (int)(((uint64_t)requested * 100 +
+			           PA_VOLUME_NORM / 2) /
+			          PA_VOLUME_NORM),
+			    0, 100);
+			bool muted = info->mute != 0;
+			if (pulse->state->volume != volume ||
+			    pulse->state->muted != muted) {
+				pulse->state->volume = volume;
+				pulse->state->maximum = 100;
+				pulse->state->muted = muted;
+				pulse->state->generation++;
+				pthread_cond_signal(&pulse->state->changed);
+			}
 		}
 	} else {
 		pulse->state->monitor_active = false;
 		pulse->state->ddc_refresh = false;
+		pulse->state->ddc_initializing = false;
 		pulse->state->volume = clamp_int(
 		    (int)(((uint64_t)pa_cvolume_avg(&info->volume) * 100 +
 		           PA_VOLUME_NORM / 2) /
@@ -465,32 +589,38 @@ static void default_sink_info(pa_context *context, const pa_sink_info *info,
 	pthread_mutex_unlock(&pulse->state->mutex);
 	notify_main(pulse->state);
 
+	(void)context;
 	if (!monitor)
 		return;
-
-	bool volume_is_normal = true;
-	for (uint8_t channel = 0; channel < info->volume.channels; channel++)
-		if (info->volume.values[channel] != PA_VOLUME_NORM)
-			volume_is_normal = false;
-
-	if (!volume_is_normal) {
-		pa_cvolume normal;
-		pa_cvolume_set(&normal, info->channel_map.channels, PA_VOLUME_NORM);
-		pa_operation *operation =
-		    pa_context_set_sink_volume_by_index(context, info->index, &normal,
-		                                        NULL, NULL);
-		if (operation)
-			pa_operation_unref(operation);
-	}
-	if (info->mute) {
-		pa_operation *operation =
-		    pa_context_set_sink_mute_by_index(context, info->index, 0, NULL, NULL);
-		if (operation)
-			pa_operation_unref(operation);
-	}
+	update_loopback_compensation(pulse);
 	if (became_monitor)
 		fprintf(stderr,
-		        "ddc-volume-control: selected configured monitor backend (DDC)\n");
+		        "ddc-volume-control: selected Display Audio hardware backend\n");
+}
+
+static void sink_event_info(pa_context *context, const pa_sink_info *info,
+                            int eol, void *userdata) {
+	struct pulse_control *pulse = userdata;
+	if (eol || !info)
+		return;
+	if (pulse->state->monitor_sink[0] && info->name &&
+	    strcmp(info->name, pulse->state->monitor_sink) == 0) {
+		set_sink_unity(context, info);
+		if (pulse->loopback_input_index != PA_INVALID_INDEX &&
+		    pulse->loopback_sink_index != info->index) {
+			pa_operation *operation = pa_context_move_sink_input_by_index(
+			    context, pulse->loopback_input_index, info->index,
+			    NULL, NULL);
+			if (operation)
+				pa_operation_unref(operation);
+		}
+		return;
+	}
+	pthread_mutex_lock(&pulse->state->mutex);
+	bool active = pulse->state->monitor_active;
+	pthread_mutex_unlock(&pulse->state->mutex);
+	if (active && pulse_sink_is_monitor(pulse, info))
+		default_sink_info(context, info, 0, pulse);
 }
 
 static void default_server_info(pa_context *context,
@@ -515,13 +645,68 @@ static void request_default_sink(pa_context *context,
 static void pulse_subscribe(pa_context *context,
                             pa_subscription_event_type_t event_type,
                             uint32_t index, void *userdata) {
-	(void)index;
-	(void)userdata;
+	struct pulse_control *pulse = userdata;
 	pa_subscription_event_type_t facility =
 	    event_type & PA_SUBSCRIPTION_EVENT_FACILITY_MASK;
-	if (facility == PA_SUBSCRIPTION_EVENT_SINK ||
-	    facility == PA_SUBSCRIPTION_EVENT_SERVER)
+	if (facility == PA_SUBSCRIPTION_EVENT_SERVER)
 		request_default_sink(context, userdata);
+	else if (facility == PA_SUBSCRIPTION_EVENT_SINK) {
+		pa_operation *operation = pa_context_get_sink_info_by_index(
+		    context, index, sink_event_info, pulse);
+		if (operation)
+			pa_operation_unref(operation);
+		request_default_sink(context, pulse);
+	} else if (facility == PA_SUBSCRIPTION_EVENT_SINK_INPUT)
+		request_loopback_input(pulse);
+}
+
+static void virtual_module_loaded(pa_context *context, uint32_t index,
+                                  void *userdata) {
+	struct pulse_control *pulse = userdata;
+	if (index == PA_INVALID_INDEX) {
+		fprintf(stderr,
+		        "ddc-volume-control: unable to create Display Audio sink\n");
+		return;
+	}
+	pulse->module_index = index;
+	pulse->module_loaded = true;
+	fprintf(stderr,
+	        "ddc-volume-control: created Display Audio sink (module %u)\n",
+	        index);
+	request_loopback_input(pulse);
+	request_default_sink(context, pulse);
+}
+
+static void load_virtual_sink(struct pulse_control *pulse) {
+	char arguments[768];
+	snprintf(arguments, sizeof(arguments),
+	         "sink_name=%s master=%s "
+	         "sink_properties=device.description=Display Audio",
+	         DISPLAY_AUDIO_MODULE_SINK, pulse->state->monitor_sink);
+	pa_operation *operation = pa_context_load_module(
+	    pulse->context, "module-virtual-sink", arguments,
+	    virtual_module_loaded, pulse);
+	if (operation)
+		pa_operation_unref(operation);
+}
+
+static void remove_stale_modules(pa_context *context,
+                                 const pa_module_info *info, int eol,
+                                 void *userdata) {
+	struct pulse_control *pulse = userdata;
+	if (eol) {
+		load_virtual_sink(pulse);
+		return;
+	}
+	if (!info || !info->name || !info->argument)
+		return;
+	if (strcmp(info->name, "module-virtual-sink") == 0 &&
+	    strstr(info->argument, "sink_name=" DISPLAY_AUDIO_MODULE_SINK)) {
+		pa_operation *operation =
+		    pa_context_unload_module(context, info->index, NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+	}
 }
 
 static void pulse_state_changed(pa_context *context, void *userdata) {
@@ -530,8 +715,18 @@ static void pulse_state_changed(pa_context *context, void *userdata) {
 	case PA_CONTEXT_READY: {
 		pa_context_set_subscribe_callback(context, pulse_subscribe, pulse);
 		pa_operation *operation = pa_context_subscribe(
-		    context, PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER,
+		    context, PA_SUBSCRIPTION_MASK_SINK |
+		                 PA_SUBSCRIPTION_MASK_SINK_INPUT |
+		                 PA_SUBSCRIPTION_MASK_SERVER,
 		    NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+		operation = pa_context_get_module_info_list(
+		    context, remove_stale_modules, pulse);
+		if (operation)
+			pa_operation_unref(operation);
+		operation = pa_context_get_sink_info_by_name(
+		    context, pulse->state->monitor_sink, sink_event_info, pulse);
 		if (operation)
 			pa_operation_unref(operation);
 		request_default_sink(context, pulse);
@@ -552,6 +747,10 @@ static int start_pulse_control(struct pulse_control *pulse,
                                struct shared_state *state) {
 	memset(pulse, 0, sizeof(*pulse));
 	pulse->state = state;
+	pulse->module_index = PA_INVALID_INDEX;
+	pulse->loopback_input_index = PA_INVALID_INDEX;
+	pulse->loopback_sink_index = PA_INVALID_INDEX;
+	pulse->requested_pa_volume = PA_VOLUME_NORM;
 	pulse->mainloop = pa_threaded_mainloop_new();
 	if (!pulse->mainloop)
 		return -1;
@@ -567,15 +766,74 @@ static int start_pulse_control(struct pulse_control *pulse,
 	return 0;
 }
 
+static void pulse_operation_done(pa_context *context, int success,
+                                 void *userdata) {
+	(void)context;
+	(void)success;
+	struct pulse_control *pulse = userdata;
+	pa_threaded_mainloop_signal(pulse->mainloop, 0);
+}
+
 static void stop_pulse_control(struct pulse_control *pulse) {
 	if (!pulse->mainloop)
 		return;
+	if (pulse->module_loaded && pulse->context) {
+		pa_threaded_mainloop_lock(pulse->mainloop);
+		pa_operation *operation = pa_context_unload_module(
+		    pulse->context, pulse->module_index, pulse_operation_done, pulse);
+		if (operation) {
+			while (pa_operation_get_state(operation) == PA_OPERATION_RUNNING)
+				pa_threaded_mainloop_wait(pulse->mainloop);
+			pa_operation_unref(operation);
+		}
+		pa_threaded_mainloop_unlock(pulse->mainloop);
+	}
 	pa_threaded_mainloop_stop(pulse->mainloop);
 	if (pulse->context) {
 		pa_context_disconnect(pulse->context);
 		pa_context_unref(pulse->context);
 	}
 	pa_threaded_mainloop_free(pulse->mainloop);
+}
+
+static void sync_display_audio(struct pulse_control *pulse) {
+	if (!pulse->mainloop || !pulse->module_loaded)
+		return;
+	pthread_mutex_lock(&pulse->state->mutex);
+	bool active = pulse->state->monitor_active;
+	int volume = pulse->state->volume;
+	int maximum = pulse->state->maximum;
+	bool muted = pulse->state->muted;
+	bool refresh_pending = pulse->state->ddc_initializing;
+	pthread_mutex_unlock(&pulse->state->mutex);
+	if (!active || maximum <= 0)
+		return;
+	if (pulse->seeding_virtual && refresh_pending)
+		return;
+	pulse->seeding_virtual = false;
+
+	pa_volume_t requested = (pa_volume_t)clamp_int(
+	    (int)(((int64_t)volume * PA_VOLUME_NORM + maximum / 2) / maximum),
+	    PA_VOLUME_MUTED, PA_VOLUME_NORM);
+	pa_threaded_mainloop_lock(pulse->mainloop);
+	if (requested != pulse->requested_pa_volume ||
+	    muted != pulse->requested_muted) {
+		pulse->setting_virtual = true;
+		pulse->requested_pa_volume = requested;
+		pulse->requested_muted = muted;
+		pa_cvolume values;
+		pa_cvolume_set(&values, 2, requested);
+		pa_operation *operation = pa_context_set_sink_volume_by_name(
+		    pulse->context, DISPLAY_AUDIO_SINK, &values, NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+		operation = pa_context_set_sink_mute_by_name(
+		    pulse->context, DISPLAY_AUDIO_SINK, muted, NULL, NULL);
+		if (operation)
+			pa_operation_unref(operation);
+	}
+	update_loopback_compensation(pulse);
+	pa_threaded_mainloop_unlock(pulse->mainloop);
 }
 
 static const char *socket_path(void) {
@@ -616,10 +874,13 @@ static int create_server_socket(void) {
 static void format_state(struct shared_state *state, char *buffer,
                          size_t size) {
 	pthread_mutex_lock(&state->mutex);
-	snprintf(buffer, size, "STATE %d %d %d %d %lu %s\n", state->volume,
+	snprintf(buffer, size, "STATE %d %d %d %d %lu %s %s\n", state->volume,
 	         state->maximum, state->muted ? 1 : 0,
 	         state->available ? 1 : 0, state->generation,
-	         state->monitor_active ? "ddc" : "pipewire");
+	         state->monitor_active ? "ddc" : "pipewire",
+	         state->monitor_active
+	             ? (state->available ? "hardware" : "software-fallback")
+	             : "native");
 	pthread_mutex_unlock(&state->mutex);
 }
 
@@ -760,6 +1021,7 @@ static int run_daemon(int bus, int poll_ms, const char *display_serial,
 			uint8_t bytes[64];
 			while (read(notify_pipe[0], bytes, sizeof(bytes)) > 0)
 				;
+			sync_display_audio(&pulse);
 			broadcast_state(watchers, &state);
 		}
 		if (!(fds[0].revents & POLLIN))
