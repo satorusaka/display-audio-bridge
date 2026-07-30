@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Display Audio Bridge
 Comment=Configure DDC-backed display audio outputs
-Exec=display-audio-settings
+Exec=/usr/bin/display-audio-settings
 Icon=audio-card
 Terminal=false
 Type=Application
